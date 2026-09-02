@@ -22,23 +22,51 @@ jobs:
       - name: Install PyEphem 4.2.1
         run: python -m pip install ephem==4.2.1
 
-      - name: Reconstruct MoonCalc payload
+      - name: Reconstruct and verify exact MoonCalc payload
         shell: pwsh
         run: |
           @'
           import base64, hashlib, pathlib, zipfile
-          p0 = pathlib.Path('benchmark_payload/p0.txt').read_text().strip()
-          p1 = pathlib.Path('benchmark_payload/p1.txt').read_text().strip()
-          data = base64.b64decode(p0 + p1, validate=True)
-          print('payload bytes:', len(data))
-          print('payload sha256:', hashlib.sha256(data).hexdigest())
+          parts = sorted(pathlib.Path('benchmark_payload/v2').glob('p*.txt'))
+          assert len(parts) == 10, f'expected 10 payload parts, got {len(parts)}'
+          b64 = ''.join(p.read_text(encoding='utf-8').strip() for p in parts)
+          assert len(b64) == 37772, f'base64 length mismatch: {len(b64)}'
+          data = base64.b64decode(b64, validate=True)
+          assert len(data) == 28328, f'payload byte length mismatch: {len(data)}'
+          sha = hashlib.sha256(data).hexdigest()
+          expected = '75a68bd10753c9bf21c98eb67f676fef084866d3ae8895c1dab09b730e7f286d'
+          assert sha == expected, f'payload sha mismatch: {sha}'
           pathlib.Path('moon_min_payload.zip').write_bytes(data)
           with zipfile.ZipFile('moon_min_payload.zip') as z:
               bad = z.testzip()
-              if bad:
-                  raise RuntimeError(f'bad zip member: {bad}')
+              assert bad is None, f'bad zip member: {bad}'
               z.extractall('moonpayload')
-              print('zip members:', len(z.namelist()))
+              print('payload verified:', len(data), sha, 'members=', len(z.namelist()))
+          '@ | python -
+
+      - name: Generate exact 1000 benchmark cases
+        shell: pwsh
+        run: |
+          @'
+          import json, pathlib
+          dates = ['2025-12-21','2026-01-19','2026-02-18','2026-03-20','2026-04-18','2026-05-17','2026-06-16','2026-07-15','2026-08-13','2026-09-12','2026-10-11','2026-11-10','2026-12-10','2027-01-08','2027-02-07','2027-03-09','2027-04-07','2027-05-07','2027-06-05','2027-07-05']
+          sites = [
+            ('Baghdad',33.3152,44.3661),('Samarra',34.1966,43.8739),('Mecca',21.3891,39.8579),('Cairo',30.0444,31.2357),('AbuDhabi',24.4539,54.3773),
+            ('Jerusalem',31.7683,35.2137),('CapeTown',-33.9249,18.4241),('Pretoria',-25.7479,28.2293),('Nairobi',-1.2921,36.8219),('Casablanca',33.5731,-7.5898),
+            ('London',51.5072,-0.1276),('Madrid',40.4168,-3.7038),('Moscow',55.0,37.6173),('NewYork',40.7128,-74.0060),('MexicoCity',19.4326,-99.1332),
+            ('Lima',-12.0464,-77.0428),('BuenosAires',-34.6037,-58.3816),('Santiago',-33.4489,-70.6693),('Sydney',-33.8688,151.2093),('Auckland',-36.8485,174.7633),
+            ('Tokyo',35.6762,139.6503),('Jakarta',-6.2088,106.8456),('NewDelhi',28.6139,77.2090),('Beijing',39.9042,116.4074),('Honolulu',21.3069,-157.8583)
+          ]
+          for lat in [-50,-25,0,25,50]:
+              for lon in [-150,-75,0,75,150]:
+                  sites.append((f'Grid_{lat:+d}_{lon:+d}',float(lat),float(lon)))
+          cases=[]
+          for d in dates:
+              for name,lat,lon in sites:
+                  cases.append({'date':d,'name':name,'lat':lat,'lon':lon,'elev_m':0.0,'utc_offset_hours':lon/15.0})
+          assert len(cases)==1000
+          pathlib.Path('moonpayload/cases.json').write_text(json.dumps({'cases':cases},ensure_ascii=False),encoding='utf-8')
+          print('cases:',len(cases))
           '@ | python -
 
       - name: Run 1000-case MoonCalc benchmark
@@ -50,7 +78,9 @@ jobs:
           if (!(Test-Path 'moonpayload/moon_results.json')) { throw 'moon_results.json was not produced' }
           $json = Get-Content 'moonpayload/moon_results.json' -Raw | ConvertFrom-Json
           if ($json.Count -ne 1000) { throw "Expected 1000 rows, got $($json.Count)" }
-          Write-Host "MoonCalc benchmark rows: $($json.Count)"
+          $exceptions = @($json | Where-Object { $_.status -eq 'EXCEPTION' }).Count
+          Write-Host "MoonCalc benchmark rows: $($json.Count); exceptions: $exceptions"
+          if ($exceptions -ne 0) { throw "MoonCalc produced $exceptions exceptions" }
 
       - name: Upload MoonCalc results
         uses: actions/upload-artifact@v4
