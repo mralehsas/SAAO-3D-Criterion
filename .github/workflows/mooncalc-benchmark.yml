@@ -25,9 +25,21 @@ jobs:
       - name: Reconstruct MoonCalc payload
         shell: pwsh
         run: |
-          $b64 = (Get-Content benchmark_payload/p0.txt -Raw) + (Get-Content benchmark_payload/p1.txt -Raw)
-          [IO.File]::WriteAllBytes('moon_min_payload.zip', [Convert]::FromBase64String($b64))
-          Expand-Archive moon_min_payload.zip -DestinationPath moonpayload -Force
+          @'
+          import base64, hashlib, pathlib, zipfile
+          p0 = pathlib.Path('benchmark_payload/p0.txt').read_text().strip()
+          p1 = pathlib.Path('benchmark_payload/p1.txt').read_text().strip()
+          data = base64.b64decode(p0 + p1, validate=True)
+          print('payload bytes:', len(data))
+          print('payload sha256:', hashlib.sha256(data).hexdigest())
+          pathlib.Path('moon_min_payload.zip').write_bytes(data)
+          with zipfile.ZipFile('moon_min_payload.zip') as z:
+              bad = z.testzip()
+              if bad:
+                  raise RuntimeError(f'bad zip member: {bad}')
+              z.extractall('moonpayload')
+              print('zip members:', len(z.namelist()))
+          '@ | python -
 
       - name: Run 1000-case MoonCalc benchmark
         run: python moonpayload/run_mooncalc.py
