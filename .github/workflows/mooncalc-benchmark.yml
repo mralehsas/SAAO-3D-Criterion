@@ -72,6 +72,32 @@ jobs:
       - name: Run 1000-case MoonCalc benchmark
         run: python moonpayload/run_mooncalc.py
 
+      - name: Enrich exact airless sunset geometry
+        shell: pwsh
+        run: |
+          @'
+          import json, pathlib, sys
+          from datetime import date, datetime
+          sys.path.insert(0, 'moonpayload')
+          import ephem
+          from app.astronomy.models import SiteInput
+          from app.astronomy.engine import _geometry_observer, _angle_deg
+          root=pathlib.Path('moonpayload')
+          cases=json.loads((root/'cases.json').read_text(encoding='utf-8'))['cases']
+          rows=json.loads((root/'moon_results.json').read_text(encoding='utf-8'))
+          assert len(cases)==len(rows)==1000
+          for c,r in zip(cases,rows):
+              if not r.get('sunset_utc'): continue
+              s=SiteInput(local_date=date.fromisoformat(c['date']), latitude_deg=float(c['lat']), longitude_deg=float(c['lon']), elevation_m=0.0, utc_offset_hours=float(c['utc_offset_hours']), ephemeris_path=None)
+              when=ephem.Date(datetime.fromisoformat(r['sunset_utc']))
+              obs=_geometry_observer(ephem,s,when)
+              sun=ephem.Sun(obs); moon=ephem.Moon(obs)
+              r['sunAltSetTrue']=_angle_deg(sun.alt); r['sunAzSet']=_angle_deg(sun.az)
+              r['moonAltSetTrue']=_angle_deg(moon.alt); r['moonAzSet']=_angle_deg(moon.az)
+          (root/'moon_results.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('enriched sunset geometry:',sum('sunAltSetTrue' in x for x in rows))
+          '@ | python -
+
       - name: Verify result file
         shell: pwsh
         run: |
@@ -79,12 +105,14 @@ jobs:
           $json = Get-Content 'moonpayload/moon_results.json' -Raw | ConvertFrom-Json
           if ($json.Count -ne 1000) { throw "Expected 1000 rows, got $($json.Count)" }
           $exceptions = @($json | Where-Object { $_.status -eq 'EXCEPTION' }).Count
-          Write-Host "MoonCalc benchmark rows: $($json.Count); exceptions: $exceptions"
+          $geom = @($json | Where-Object { $null -ne $_.sunAltSetTrue }).Count
+          Write-Host "MoonCalc benchmark rows: $($json.Count); exceptions: $exceptions; geometry: $geom"
           if ($exceptions -ne 0) { throw "MoonCalc produced $exceptions exceptions" }
+          if ($geom -ne 1000) { throw "Expected 1000 geometry rows, got $geom" }
 
       - name: Upload MoonCalc results
         uses: actions/upload-artifact@v4
         with:
-          name: mooncalc-results
+          name: mooncalc-results-enriched
           path: moonpayload/moon_results.json
           retention-days: 3
