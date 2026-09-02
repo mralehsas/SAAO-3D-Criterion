@@ -1,0 +1,48 @@
+name: MoonCalc v0.9.2 benchmark
+
+on:
+  push:
+    branches:
+      - benchmark-saao-accuracy-20260902
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout benchmark branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install PyEphem 4.2.1
+        run: python -m pip install ephem==4.2.1
+
+      - name: Reconstruct MoonCalc payload
+        shell: pwsh
+        run: |
+          $b64 = (Get-Content benchmark_payload/p0.txt -Raw) + (Get-Content benchmark_payload/p1.txt -Raw)
+          [IO.File]::WriteAllBytes('moon_min_payload.zip', [Convert]::FromBase64String($b64))
+          Expand-Archive moon_min_payload.zip -DestinationPath moonpayload -Force
+
+      - name: Run 1000-case MoonCalc benchmark
+        run: python moonpayload/run_mooncalc.py
+
+      - name: Verify result file
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'moonpayload/moon_results.json')) { throw 'moon_results.json was not produced' }
+          $json = Get-Content 'moonpayload/moon_results.json' -Raw | ConvertFrom-Json
+          if ($json.Count -ne 1000) { throw "Expected 1000 rows, got $($json.Count)" }
+          Write-Host "MoonCalc benchmark rows: $($json.Count)"
+
+      - name: Upload MoonCalc results
+        uses: actions/upload-artifact@v4
+        with:
+          name: mooncalc-results
+          path: moonpayload/moon_results.json
+          retention-days: 3
